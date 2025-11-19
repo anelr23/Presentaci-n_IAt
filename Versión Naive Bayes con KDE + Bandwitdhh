@@ -1,0 +1,164 @@
+import numpy as np
+from sklearn.model_selection import StratifiedKFold
+from sklearn.neighbors import KernelDensity
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score
+import joblib
+
+class NaiveBayesKDE_PerFeatureBW:
+    """
+    Naive Bayes KDE with a specific bandwidth for EACH feature per class.
+    For each feature j and class c:
+        bandwidth[j][c] is selected by cross-validation.
+    """
+    def __init__(self, bandwidth_candidates=[0.1, 0.2, 0.5, 1.0, 2.0], kernel='gaussian'):
+        self.bandwidth_candidates = bandwidth_candidates
+        self.kernel = kernel
+        self.kde_models = {}          # kde_models[c][j] = KDE model
+        self.bandwidths = {}          # bandwidths[c][j] = selected bandwidth
+        self.classes_ = None
+        self.priors_ = {}
+        self.scaler = None
+
+    # --------------------------------------------------------
+    # Fit with bandwidth optimization per feature & class
+    # --------------------------------------------------------
+    def fit(self, X, y, scaler=None, cv_splits=3):
+        X = np.asarray(X)
+        y = np.asarray(y)
+        n, d = X.shape
+
+        # Store classes and priors
+        self.classes_, counts = np.unique(y, return_counts=True)
+        self.priors_ = {c: counts[i] / len(y) for i, c in enumerate(self.classes_)}
+
+        # Optional scaler
+        if scaler is not None:
+            self.scaler = scaler
+            X_scaled = scaler.transform(X)
+        else:
+            X_scaled = X
+
+        # Create dict structure
+        for c in self.classes_:
+            self.kde_models[c] = {}
+            self.bandwidths[c] = {}
+
+        # CV
+        skf = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=42)
+
+        # --------------------------------------------------------
+        # Select bandwidth for each feature and each class
+        # --------------------------------------------------------
+        for c in self.classes_:
+            Xc = X_scaled[y == c]
+
+            for j in range(d):
+                feature_vals = Xc[:, j].reshape(-1, 1)
+
+                best_bw = None
+                best_score = -np.inf
+
+                # Buscar el mejor bandwidth
+                for bw in self.bandwidth_candidates:
+                    scores = []
+
+                    for train_idx, val_idx in skf.split(feature_vals, np.zeros(len(feature_vals))):
+                        kde = KernelDensity(kernel=self.kernel, bandwidth=bw)
+                        kde.fit(feature_vals[train_idx])
+
+                        # log-likelihood promedio en validación
+                        ll = np.mean(kde.score_samples(feature_vals[val_idx]))
+                        scores.append(ll)
+
+                    mean_ll = np.mean(scores)
+
+                    if mean_ll > best_score:
+                        best_score = mean_ll
+                        best_bw = bw
+
+                # Guardar el mejor bandwidth
+                self.bandwidths[c][j] = best_bw
+
+                # Entrenar KDE final con el bandwidth óptimo
+                kde = KernelDensity(kernel=self.kernel, bandwidth=best_bw)
+                kde.fit(feature_vals)
+                self.kde_models[c][j] = kde
+
+        return self
+
+    # --------------------------------------------------------
+    # Return log-likelihood for each sample and class
+    # --------------------------------------------------------
+    def _log_likelihood(self, X):
+        if self.scaler is not None:
+            Xs = self.scaler.transform(X)
+        else:
+            Xs = X
+
+        n, d = Xs.shape
+        log_lik = {}
+
+        for c in self.classes_:
+            total = np.zeros(n)
+            for j in range(d):
+                kde = self.kde_models[c][j]
+                vals = Xs[:, j].reshape(-1, 1)
+                total += kde.score_samples(vals)
+            log_lik[c] = total
+
+        return log_lik
+
+    # --------------------------------------------------------
+    # Predict probabilities
+    # --------------------------------------------------------
+    def predict_proba(self, X):
+        log_lik = self._log_likelihood(X)
+        log_prior = {c: np.log(self.priors_[c]) for c in self.classes_}
+
+        n = len(X)
+        log_post = np.zeros((n, len(self.classes_)))
+
+        for idx, c in enumerate(self.classes_):
+            log_post[:, idx] = log_prior[c] + log_lik[c]
+
+        # log-sum-exp normalization
+        max_log = np.max(log_post, axis=1, keepdims=True)
+        stabilized = log_post - max_log
+        probs = np.exp(stabilized)
+        probs /= np.sum(probs, axis=1, keepdims=True)
+
+        return probs
+
+    # --------------------------------------------------------
+    # Predict class labels
+    # --------------------------------------------------------
+    def predict(self, X):
+        probs = self.predict_proba(X)
+        idx = np.argmax(probs, axis=1)
+        return self.classes_[idx]
+
+    # --------------------------------------------------------
+    # Save and load
+    # --------------------------------------------------------
+    def save(self, path):
+        joblib.dump({
+            'kde_models': self.kde_models,
+            'bandwidths': self.bandwidths,
+            'classes_': self.classes_,
+            'priors_': self.priors_,
+            'kernel': self.kernel,
+            'scaler': self.scaler,
+            'bandwidth_candidates': self.bandwidth_candidates
+        }, path)
+
+    @classmethod
+    def load(cls, path):
+        data = joblib.load(path)
+        inst = cls(bandwidth_candidates=data['bandwidth_candidates'], kernel=data['kernel'])
+        inst.kde_models = data['kde_models']
+        inst.bandwidths = data['bandwidths']
+        inst.classes_ = data['classes_']
+        inst.priors_ = data['priors_']
+        inst.scaler = data['scaler']
+        return inst
