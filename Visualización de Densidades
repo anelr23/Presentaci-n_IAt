@@ -1,0 +1,14 @@
+import matplotlib.pyplot as plt
+import numpy as np
+
+feature_index = 1  # Por ejemplo, Glucose
+
+for c in model.classes_:
+    kde = model.kde_models_[c][feature_index]
+    x_vals = np.linspace(X.iloc[:, feature_index].min(), X.iloc[:, feature_index].max(), 1000).reshape(-1, 1)
+    log_dens = kde.score_samples(x_vals)
+    plt.plot(x_vals, np.exp(log_dens), label=f'Clase {c}')
+
+plt.title("Distribución KDE para Glucosa")
+plt.legend()
+plt.show()
